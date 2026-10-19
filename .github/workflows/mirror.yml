@@ -1,0 +1,69 @@
+name: Mirror upstream web builds
+
+on:
+  schedule:
+    - cron: "37 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+
+concurrency: mirror
+
+env:
+  UP: daijro/Lemon-Studio-web
+  APP: lemon-studio
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Mirror every web build
+        run: |
+          # Each release carries one lemon-studio-web.zip. They are all marked prerelease, so prereleases are included.
+          for tag in $(gh release list -R "$UP" --limit 200 --exclude-drafts --json tagName -q '.[].tagName'); do
+            ver="${tag#v}"
+            if [ -d "v$ver" ]; then bash scripts/skip.sh del "$ver"; continue; fi
+            tmp=$(mktemp -d)
+            if ! gh release download "$tag" -R "$UP" -p lemon-studio-web.zip -D "$tmp"; then
+              bash scripts/skip.sh add "$ver" "Its browser build could not be downloaded."; continue
+            fi
+            unzip -q "$tmp/lemon-studio-web.zip" -d "$tmp/x"
+            [ -f "$tmp/x/index.html" ] || { bash scripts/skip.sh add "$ver" "Its browser build has no index.html, so it can't be opened."; continue; }
+            mkdir "v$ver"
+            cp -a "$tmp/x/." "v$ver/"
+            # The precompressed copies are for servers that can serve them; GitHub Pages compresses on its own.
+            find "v$ver" -name '*.gz' -delete
+            # The app needs cross-origin isolation, which GitHub Pages can't set with headers. A small service worker
+            # (coi-serviceworker, MIT) adds them, reloading the page once on first visit.
+            cp scripts/coi-serviceworker.js "v$ver/coi-serviceworker.js"
+            sed -i 's|<script type="module" src="./bootstrap.mjs">|<script src="coi-serviceworker.js"></script><script type="module" src="./bootstrap.mjs">|' "v$ver/index.html"
+            grep -q coi-serviceworker "v$ver/index.html" || echo "::warning::coi-serviceworker was not added to v$ver"
+            printf 'Mirrored from the %s release of https://github.com/%s\nOne addition: coi-serviceworker.js (MIT, github.com/gzuidhof/coi-serviceworker) and a script tag for it in index.html, so the page gets the cross-origin isolation it needs on GitHub Pages. The precompressed .gz copies were dropped.\n' "$tag" "$UP" > "v$ver/SOURCE.txt"
+            bash scripts/skip.sh del "$ver"
+            rm -rf "$tmp"
+          done
+
+          versions=$(find . -maxdepth 1 -type d -name 'v[0-9]*' -printf '%f\n' | sed 's/^v//' | sort -rV)
+          [ -n "$versions" ] || { echo "No versions"; exit 0; }
+          latest=$(echo "$versions" | head -n1)
+          mkdir -p latest
+          printf '<!doctype html><meta charset="utf-8"><title>%s</title><meta http-equiv="refresh" content="0; url=../v%s/"><link rel="canonical" href="../v%s/"><a href="../v%s/">Open %s %s</a>\n' "$APP" "$latest" "$latest" "$latest" "$APP" "$latest" > latest/index.html
+          echo "$versions" | jq -R . | jq -s --arg latest "$latest" '{latest: $latest, versions: .}' > versions.json
+          cat versions.json
+          bash scripts/prune.sh
+
+      - name: Commit and request a Pages build
+        run: |
+          git add -A
+          if git diff --cached --quiet; then echo "Nothing new"; exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Mirror upstream web builds"
+          git pull -q --rebase origin main || true
+          git push
+          gh api -X POST "repos/${{ github.repository }}/pages/builds"
