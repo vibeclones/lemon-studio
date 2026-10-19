@@ -1,0 +1,2 @@
+Mirrored from the v0.0.1-web.9 release of https://github.com/daijro/Lemon-Studio-web
+One addition: coi-serviceworker.js (MIT, github.com/gzuidhof/coi-serviceworker) and a script tag for it in index.html, so the page gets the cross-origin isolation it needs on GitHub Pages. The precompressed .gz copies were dropped.
